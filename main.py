@@ -4,6 +4,7 @@ import numpy as np
 from PySide6.QtWidgets import QApplication, QMainWindow, QPushButton, QVBoxLayout, QWidget, QLabel
 from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtCore import Qt, QThread, Signal
+from random import random
 
 class ImageGeneratorThread(QThread):
     image_ready = Signal(np.ndarray)
@@ -13,16 +14,22 @@ class ImageGeneratorThread(QThread):
         self.shape = shape
         self.running = True
         self.image_buffer = mx.zeros(self.shape, dtype=mx.float32)
-        self.image_buffer = noise(self.image_buffer, 0.0003)
+        # p is a random float between .0000001 and .0001
+        p = random() * (.0001 - .0000001) + .0000001
+        self.image_buffer = noise(self.image_buffer, p)
         self.blur1_buffer = mx.zeros(self.shape, dtype=mx.float32)
         self.blur2_buffer = mx.zeros(self.shape, dtype=mx.float32)
-        print("Initialized image buffer")
+        print(f"Initialized image buffer with noise; {p}")
     def run(self):
-        
+        # b1 is a random float between 1.0 and 2.3
+        b1 = random() * (2.3 - 1.0) + 1.0
+        # b2 is a random float between 2.1 and 6.5
+        b2 = b1 * 4.0 #random() * (6.5 - 2.1) + 2.1
         while self.running:
-            
-            self.blur1_buffer = gaussian_blur(self.image_buffer,1.0)
-            self.blur2_buffer = gaussian_blur(self.image_buffer,4.0)
+
+            self.blur1_buffer = gaussian_blur(self.image_buffer,b1)
+            self.blur2_buffer = gaussian_blur(self.image_buffer,b2)
+            #print(f"Blurred image with b1: {b1} and b2: {b2}")
             self.image_buffer = reaction_diffusion(self.image_buffer, self.blur1_buffer, self.blur2_buffer)
             
             np_image_buffer = np.array(self.image_buffer)
@@ -72,17 +79,19 @@ def gaussian_blur(a: mx.array, r: float):
     """
     kernel = mx.fast.metal_kernel(
         name="gaussian_blur",
+        input_names=["inp","sigma"],
+        output_names=["out"],
         source=source
     )
     outputs = kernel(
-        inputs={"inp": a, "sigma": r}, 
-        template={"T": mx.float32}, 
-        grid=(a.shape[0], a.shape[1], 1), 
-        threadgroup=(256,1, 1), 
-        output_shapes={"out": a.shape},
-        output_dtypes={"out": a.dtype},
+        inputs=[a, r],
+        template=[("T", mx.float32)],
+        grid=(a.shape[0], a.shape[1], 1),
+        threadgroup=(256,1,1),
+        output_shapes=[a.shape],
+        output_dtypes=[a.dtype],
     )
-    return outputs["out"]
+    return outputs[0]
 def blur(a: mx.array, r: float):
     source = """
         uint elem = (thread_position_in_grid.x + thread_position_in_grid.y * threads_per_grid.x) * 3;
@@ -121,17 +130,19 @@ def blur(a: mx.array, r: float):
     """
     kernel = mx.fast.metal_kernel(
         name="blur",
+        input_names=["inp","r"],
+        output_names=["out"],
         source=source
     )
     outputs = kernel(
-        inputs={"inp": a, "r": r}, 
-        template={"T": mx.float32}, 
-        grid=(a.shape[0], a.shape[1], 1), 
-        threadgroup=(256,1, 1), 
-        output_shapes={"out": a.shape},
-        output_dtypes={"out": a.dtype},
+        inputs=[a, r],
+        template=[("T", mx.float32)],
+        grid=(a.shape[0], a.shape[1], 1),
+        threadgroup=(256,1,1),
+        output_shapes=[a.shape],
+        output_dtypes=[a.dtype],
     )
-    return outputs["out"]
+    return outputs[0]
 def reaction_diffusion(a: mx.array, b1: mx.array, b2: mx.array):
     source = """
         uint elem = (thread_position_in_grid.x + thread_position_in_grid.y * threads_per_grid.x) * 3;
@@ -155,17 +166,19 @@ def reaction_diffusion(a: mx.array, b1: mx.array, b2: mx.array):
     """
     kernel = mx.fast.metal_kernel(
         name="reaction_diffusion",
+        input_names=["inp","b1","b2"],
+        output_names=["out"],
         source=source
     )
     outputs = kernel(
-        inputs={"inp": a, "b1": b1, "b2": b2}, 
-        template={"T": mx.float32}, 
-        grid=(a.shape[0], a.shape[1], 1), 
-        threadgroup=(256,1, 1), 
-        output_shapes={"out": a.shape},
-        output_dtypes={"out": a.dtype},
+        inputs=[a, b1, b2],
+        template=[("T", mx.float32)],
+        grid=(a.shape[0], a.shape[1], 1),
+        threadgroup=(256,1,1),
+        output_shapes=[a.shape],
+        output_dtypes=[a.dtype],
     )
-    return outputs["out"]
+    return outputs[0]
 def noise(a: mx.array, p:float):
     header = """
         #include <metal_stdlib>
@@ -228,18 +241,20 @@ def noise(a: mx.array, p:float):
     """
     kernel = mx.fast.metal_kernel(
         name="noise",
+        input_names=["inp","p"],
+        output_names=["out"],
         source=source,
-        header=header,
+        header=header
     )
     outputs = kernel(
-        inputs={"inp": a, "p": p}, 
-        template={"T": mx.float32}, 
-        grid=(a.shape[0], a.shape[1], 1), 
-        threadgroup=(256,1, 1), 
-        output_shapes={"out": a.shape},
-        output_dtypes={"out": a.dtype},
+        inputs=[a, p],
+        template=[("T", mx.float32)],
+        grid=(a.shape[0], a.shape[1], 1),
+        threadgroup=(256,1,1),
+        output_shapes=[a.shape],
+        output_dtypes=[a.dtype],
     )
-    return outputs["out"]
+    return outputs[0]
 
 class ImageGeneratorWindow(QMainWindow):
     def __init__(self):
@@ -264,6 +279,14 @@ class ImageGeneratorWindow(QMainWindow):
         self.generator_thread = ImageGeneratorThread(self.image_shape)
         self.generator_thread.image_ready.connect(self.update_image)
         self.generator_thread.start()
+        self.recent_white = [0.0]
+
+    def reset_simulation(self):
+        self.generator_thread.stop()
+        self.generator_thread.wait()
+        self.generator_thread = ImageGeneratorThread(self.image_shape)
+        self.generator_thread.image_ready.connect(self.update_image)
+        self.generator_thread.start()
 
     def update_image(self, image_data):
         width, height, channel = self.image_shape
@@ -271,6 +294,18 @@ class ImageGeneratorWindow(QMainWindow):
         qimage = QImage(image_data.data, width, height, bytes_per_line, QImage.Format_RGB888)
         pixmap = QPixmap.fromImage(qimage)
         self.image_label.setPixmap(pixmap.scaled(self.image_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        # count the white pixels
+        white = np.count_nonzero(image_data == 255)
+        self.recent_white.append(white)
+        if len(self.recent_white) < 60:
+            return
+        # trim the list to keep the most recent 60 elements
+        self.recent_white = self.recent_white[-60:]
+        std = np.std(self.recent_white)
+        # if image is stabilized, reset
+        if std < 0.8:
+            self.reset_simulation()
+            self.recent_white = [0.0]
 
     def toggle_generation(self):
         if self.generator_thread.running:
